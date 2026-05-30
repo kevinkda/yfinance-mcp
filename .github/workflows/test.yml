@@ -1,0 +1,28 @@
+name: test
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    # Consume the shared reusable CI workflow (kevinkda/mcp-ci-templates).
+    # secrets: inherit is required so the gitleaks step receives GITHUB_TOKEN.
+    #
+    # run-security-grep is false: yfinance has no trade / mutation surface to
+    # grep for (it is an inherently read-only market-data library). The
+    # read-only posture here is enforced by the narrow YFinanceClient method
+    # allow-list (see src/yfinance_mcp/client.py) rather than a mutation-keyword
+    # grep gate. The coverage threshold (fail_under = 85) is pinned in this
+    # repo's pyproject.toml and enforced by `uv run pytest --cov`.
+    uses: kevinkda/mcp-ci-templates/.github/workflows/reusable-mcp-ci.yml@main
+    secrets: inherit  # pragma: allowlist secret
+    with:
+      os-matrix: '["ubuntu-latest", "macos-latest"]'
+      python-versions: '["3.11", "3.12"]'
+      run-security-grep: false

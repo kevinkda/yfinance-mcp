@@ -1,0 +1,75 @@
+# Dependabot configuration — yfinance-mcp
+#
+# Strategy:
+# - Weekly cadence on Monday (low review fatigue; one PR per week max).
+# - Group minor + patch into a single PR per ecosystem so the user does not
+#   review unrelated tiny bumps separately.
+# - Ignore `yfinance` major bumps because yfinance scrapes an undocumented
+#   Yahoo Finance endpoint and breaks frequently across majors; any bump must
+#   be done manually with the upgrade checklist in docs/THREAT_MODEL.md.
+# - Ignore major-version bumps for the `mcp` SDK because the 1.x -> 2.x bump
+#   requires running the compatibility checklist before the bump.
+
+version: 2
+updates:
+  # Python deps via uv.lock (pyproject.toml is the manifest).
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 1
+    assignees:
+      - "kevinkda"
+    reviewers:
+      - "kevinkda"
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      python-minor-and-patch:
+        applies-to: "version-updates"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # yfinance scrapes an undocumented Yahoo endpoint and breaks across
+      # majors; bumps require manual review per docs/THREAT_MODEL.md.
+      - dependency-name: "yfinance"
+        update-types:
+          - "version-update:semver-major"
+      # mcp 1.x -> 2.x major bump requires the compatibility checklist.
+      - dependency-name: "mcp"
+        update-types:
+          - "version-update:semver-major"
+
+  # GitHub Actions workflow versions (actions/checkout, astral-sh/setup-uv, ...).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 1
+    assignees:
+      - "kevinkda"
+    reviewers:
+      - "kevinkda"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "chore(ci)"
+      include: "scope"
+    groups:
+      actions-minor-and-patch:
+        applies-to: "version-updates"
+        update-types:
+          - "minor"
+          - "patch"
