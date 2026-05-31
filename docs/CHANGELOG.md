@@ -11,12 +11,9 @@ The authoritative version lives in `src/yfinance_mcp/__init__.py` (`__version__`
 
 ## [Unreleased]
 
-Phase 3 (tests, batch-4 100%-coverage campaign) and Phase 4 (first tagged
-release + registry submission) are tracked here once they land.
+## [0.1.0] — 2026-05-31
 
-## [0.1.0] — unreleased scaffold
-
-Initial scaffold. Read-only MCP server exposing Yahoo Finance data via
+Initial tagged release. Read-only MCP server exposing Yahoo Finance data via
 [`yfinance`](https://github.com/ranaroussi/yfinance) to supplement the
 schwab / polygon / sec-edgar sibling servers (corporate splits, earnings
 calendar, financial statements, analyst recommendations).
@@ -49,12 +46,33 @@ calendar, financial statements, analyst recommendations).
 - **Docs** — `README.md`, `README_zh.md`, `docs/SECURITY.md`,
   `docs/REGISTER.md`, `docs/RELEASE.md`, `docs/THREAT_MODEL.md`,
   `CONTRIBUTING.md`, `KNOWN_ISSUES.md`, and this changelog.
+- **Tests** — full suite of 308 tests reaching **100 % line + branch
+  coverage** across every source module, driven entirely by an injected fake
+  `ticker_factory` returning canned pandas frames (**zero real yfinance
+  network calls**). Covers `client` / `cache` / `models` / all six tools /
+  `server` / `meta` / `bootstrap` / `_platform`.
+- **Security tests** — OWASP Top 10 for **2017, 2021, and 2025**, plus
+  dedicated penetration, exception-path, and boundary-value suites. Each
+  test asserts substantively; not-applicable categories (XSS, XXE, auth,
+  crypto) carry explicit guards documenting why they do not apply to a
+  read-only, no-credential, no-HTML/XML scraping server.
+
+### Changed
+
+- Coverage gate `fail_under` raised from `85` to **`100`** in
+  `pyproject.toml`; the version placeholder advances from `0.0.0+dev` to
+  `0.1.0`.
+- `numpy` capped to `>=2.0,<2.3` (transitive via yfinance/pandas) so `uv
+  sync` resolves a manylinux-wheel build instead of an sdist; `uv.lock`
+  committed for reproducible CI.
 
 ### Security
 
 - Read-only by construction: `yfinance` is a data-scraping library with no
   order / trade / write surface; the client additionally gates every call
-  through `_READ_ONLY_METHODS`.
+  through `_READ_ONLY_METHODS`. The read-only + ToS contract is asserted by
+  the OWASP 2025 / ToS test suite (`is_read_only=true`,
+  `data_is_realtime=false`).
 - ToS gray-zone declaration carried in the README banners,
   [docs/SECURITY.md](SECURITY.md), and [docs/THREAT_MODEL.md](THREAT_MODEL.md).
 
