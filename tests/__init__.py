@@ -1,0 +1,1 @@
+"""yfinance-mcp test suite."""

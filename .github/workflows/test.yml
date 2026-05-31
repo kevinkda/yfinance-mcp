@@ -18,7 +18,7 @@ jobs:
     # grep for (it is an inherently read-only market-data library). The
     # read-only posture here is enforced by the narrow YFinanceClient method
     # allow-list (see src/yfinance_mcp/client.py) rather than a mutation-keyword
-    # grep gate. The coverage threshold (fail_under = 85) is pinned in this
+    # grep gate. The coverage threshold (fail_under = 100) is pinned in this
     # repo's pyproject.toml and enforced by `uv run pytest --cov`.
     uses: kevinkda/mcp-ci-templates/.github/workflows/reusable-mcp-ci.yml@main
     secrets: inherit  # pragma: allowlist secret

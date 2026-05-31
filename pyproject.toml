@@ -26,6 +26,10 @@ dependencies = [
     "pydantic>=2.6,<3",
     "python-dotenv>=1.0,<2",
     "duckdb>=1.0,<2.0",
+    # numpy is pulled transitively by yfinance/pandas; cap below 2.3 so the
+    # resolver lands on a version that ships manylinux wheels for this
+    # toolchain (numpy>=2.3 only offers an sdist here and requires GCC>=9.3).
+    "numpy>=2.0,<2.3",
 ]
 
 [project.optional-dependencies]
@@ -104,7 +108,7 @@ exclude_also = [
     "pragma: no cover",
     "@(abc\\.)?abstractmethod",
 ]
-fail_under = 85
+fail_under = 100
 show_missing = true
 skip_covered = false
 
