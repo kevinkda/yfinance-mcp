@@ -7,7 +7,7 @@
 > 也未授权自动抓取。**仅限个人、低频、研究用途** —— 不可用于商业用途或批量
 > 再分发。数据为**延迟（约 15 分钟）且尽力而为**，绝非实时或权威数据。风险
 > 自担。
-
+>
 > **🔒 只读** —— 无下单 / 交易 / 写入接口。yfinance 是数据抓取库，无法下单。
 
 [![test](https://github.com/kevinkda/yfinance-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/kevinkda/yfinance-mcp/actions/workflows/test.yml)

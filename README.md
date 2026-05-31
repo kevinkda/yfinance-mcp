@@ -8,7 +8,7 @@
 > scraping. **Personal, low-volume, research use ONLY** — not for
 > commercial use or bulk redistribution. Data is **delayed (~15 min) and
 > best-effort**, never real-time or authoritative. You assume the risk.
-
+>
 > **🔒 READ-ONLY** — no order / trade / write surface. yfinance is a
 > data-scraping library and cannot place trades.
 
