@@ -29,7 +29,7 @@ dependencies = [
     # numpy is pulled transitively by yfinance/pandas; cap below 2.3 so the
     # resolver lands on a version that ships manylinux wheels for this
     # toolchain (numpy>=2.3 only offers an sdist here and requires GCC>=9.3).
-    "numpy>=2.0,<2.3",
+    "numpy>=2.4.6,<2.5",
 ]
 
 [project.optional-dependencies]
@@ -38,7 +38,7 @@ dev = [
     "pytest-asyncio>=0.23,<2",
     "pytest-cov>=7.1.0,<8",
     "respx>=0.22.0,<0.24",
-    "ruff>=0.6,<1",
+    "ruff>=0.15.16,<1",
     "mypy>=1.10,<2",
     "bandit>=1.7,<2",
     "pip-audit>=2.7,<3",
