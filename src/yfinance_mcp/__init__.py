@@ -15,4 +15,4 @@ supplements the companion read-only servers (``schwab-marketdata-mcp``,
     a real-time or authoritative feed. See ``docs/SECURITY.md``.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

@@ -85,8 +85,9 @@ persisted as historical snapshots to a local DuckDB at
 `~/.local/state/yfinance-mcp/cache.duckdb`, so your LLM agent can run
 "what changed since last time" queries **without re-scraping Yahoo** (which
 is both slow and ToS-sensitive). The cache is best-effort: any DuckDB error
-is logged and the tool falls through to a live fetch. Disable via
-`YFINANCE_CACHE_ENABLED=0`.
+is logged and the tool falls through to a live fetch. The cache is **opt-in
+(default DISABLED)** — enable it with `YFINANCE_CACHE_ENABLED=true` (also
+accepts `1` / `yes` / `on`).
 
 ## Security & Terms of Service
 

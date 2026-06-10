@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
+from yfinance_mcp import __version__
 from yfinance_mcp.client import YFinanceClient, YFinanceError
 from yfinance_mcp.tools import _common, earnings, financials, meta, recommendations, splits
 from yfinance_mcp.tools._common import (
@@ -327,7 +328,7 @@ class TestMeta:
     def test_get_server_info(self) -> None:
         out = meta.get_server_info_impl()
         assert out["name"] == "yfinance-mcp"
-        assert out["version"] == "0.1.0"
+        assert out["version"] == __version__
         assert out["is_read_only"] is True
         assert out["data_is_realtime"] is False
         assert len(out["tools"]) == 6

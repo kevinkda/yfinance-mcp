@@ -77,8 +77,8 @@ uv run python -m yfinance_mcp  # 等价写法
 抓取到的数据帧（拆股 / 财报 / 财务 / 评级）会作为历史快照持久化到本地 DuckDB
 `~/.local/state/yfinance-mcp/cache.duckdb`，让 LLM agent 可以做"与上次相比有何
 变化"的查询，而**无需再次抓取 Yahoo**（既慢又涉及 ToS 风险）。缓存是尽力而为的：
-任何 DuckDB 错误都会被记录，工具回退到实时抓取。可通过
-`YFINANCE_CACHE_ENABLED=0` 关闭。
+任何 DuckDB 错误都会被记录，工具回退到实时抓取。缓存为**选择性启用（默认禁用）**——
+通过 `YFINANCE_CACHE_ENABLED=true`（也接受 `1` / `yes` / `on`）开启。
 
 ## 安全与服务条款
 

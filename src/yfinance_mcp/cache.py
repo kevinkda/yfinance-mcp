@@ -58,7 +58,13 @@ def _truthy(raw: str | None, *, default: bool) -> bool:
 
 
 def cache_enabled() -> bool:
-    return _truthy(os.environ.get(ENV_CACHE_ENABLED), default=True)
+    """Honor ``YFINANCE_CACHE_ENABLED`` (default off — opt-in).
+
+    .. versionchanged:: 0.1.1
+        cache now opt-in, default disabled.  Set ``YFINANCE_CACHE_ENABLED=true``
+        (also accepts ``1`` / ``yes`` / ``on``) to enable the DuckDB cache.
+    """
+    return _truthy(os.environ.get(ENV_CACHE_ENABLED), default=False)
 
 
 def cache_bypass() -> bool:
@@ -327,7 +333,8 @@ _cache_singleton_lock = threading.Lock()
 def get_cache() -> Cache | None:
     """Return the process-wide :class:`Cache` (lazy init).
 
-    Returns ``None`` if caching is disabled via ``YFINANCE_CACHE_ENABLED=0``.
+    Returns ``None`` when caching is disabled, which is the **default** —
+    the cache is opt-in via ``YFINANCE_CACHE_ENABLED=true``.
     """
     global _cache_singleton
     if not cache_enabled():

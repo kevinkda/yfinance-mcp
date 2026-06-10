@@ -126,11 +126,35 @@ class TestCacheLifecycle:
 
 
 class TestCacheConfig:
-    def test_cache_enabled_default_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_cache_enabled_default_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("YFINANCE_CACHE_ENABLED", raising=False)
-        assert cache_enabled() is True
+        assert cache_enabled() is False
 
-    @pytest.mark.parametrize("val,expected", [("0", False), ("false", False), ("1", True), ("yes", True), ("on", True)])
+    def test_cache_enabled_empty_string_default_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("YFINANCE_CACHE_ENABLED", "")
+        assert cache_enabled() is False
+
+    @pytest.mark.parametrize(
+        "val,expected",
+        [
+            ("1", True),
+            ("true", True),
+            ("yes", True),
+            ("on", True),
+            ("TRUE", True),
+            ("Yes", True),
+            ("ON", True),
+            ("  true  ", True),
+            (" 1 ", True),
+            ("0", False),
+            ("false", False),
+            ("no", False),
+            ("off", False),
+            ("FALSE", False),
+            ("nope", False),
+            ("2", False),
+        ],
+    )
     def test_cache_enabled_values(self, monkeypatch: pytest.MonkeyPatch, val: str, expected: bool) -> None:
         monkeypatch.setenv("YFINANCE_CACHE_ENABLED", val)
         assert cache_enabled() is expected
@@ -158,6 +182,11 @@ class TestCacheConfig:
 class TestCacheSingleton:
     def test_get_cache_disabled_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("YFINANCE_CACHE_ENABLED", "0")
+        cache_module.reset_cache_singleton()
+        assert get_cache() is None
+
+    def test_get_cache_unset_default_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("YFINANCE_CACHE_ENABLED", raising=False)
         cache_module.reset_cache_singleton()
         assert get_cache() is None
 
