@@ -1,6 +1,6 @@
 [project]
 name = "yfinance-mcp"
-version = "0.1.1"
+version = "0.2.0"
 description = "Read-only MCP server for Yahoo Finance data (splits, earnings calendar, financials, analyst recommendations) via yfinance. Supplements schwab/polygon/sec-edgar gaps."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,7 +25,6 @@ dependencies = [
     "yfinance>=1.2,<2.0",
     "pydantic>=2.6,<3",
     "python-dotenv>=1.0,<2",
-    "duckdb>=1.0,<2.0",
     # numpy is pulled transitively by yfinance/pandas; cap below 2.3 so the
     # resolver lands on a version that ships manylinux wheels for this
     # toolchain (numpy>=2.3 only offers an sdist here and requires GCC>=9.3).
@@ -33,6 +32,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+clickhouse = ["clickhouse-connect>=0.7,<1"]
 dev = [
     "pytest>=9.0.3,<10",
     "pytest-asyncio>=0.23,<2",
@@ -180,7 +180,7 @@ show_error_codes = true
 exclude = ["build/", "dist/", ".venv/", "htmlcov/"]
 
 [[tool.mypy.overrides]]
-module = ["yfinance.*", "mcp.*", "pandas.*"]
+module = ["yfinance.*", "mcp.*", "pandas.*", "clickhouse_connect.*"]
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------

@@ -1,13 +1,18 @@
-"""Cache (DuckDB) coverage tests — real cache rooted in tmp_path, plus
-quarantine/error/disabled branches via monkeypatch. Zero network."""
+"""Cache facade coverage tests for the pluggable backend (v0.7 T0).
+
+.. versionchanged:: 0.2.0
+    DuckDB removed; the cache delegates to a pluggable ``CacheBackend``
+    (memory default).  Snapshot writes append to a derived-analysis time
+    series — the memory backend keeps no durable history (persists 0 rows),
+    a ClickHouse backend persists the full batch.  Zero network.
+"""
 
 from __future__ import annotations
 
-from pathlib import Path
+import json
 from typing import Any
 from unittest.mock import MagicMock
 
-import duckdb
 import pytest
 
 from yfinance_mcp import cache as cache_module
@@ -16,113 +21,140 @@ from yfinance_mcp.cache import (
     _to_float,
     cache_bypass,
     cache_enabled,
-    default_db_path,
     get_cache,
 )
+from yfinance_mcp.cache_backend import ClickHouseBackend, MemoryBackend
 
 
-class TestCacheWrites:
-    def test_write_and_read_splits(self, tmp_cache: Cache) -> None:
-        n = tmp_cache.write_splits("AAPL", [{"split_date": "2020-08-31", "ratio": 4.0}])
+def _ch_cache() -> tuple[Cache, MagicMock]:
+    client = MagicMock()
+    client.command.return_value = None
+    client.insert.return_value = None
+    result = MagicMock()
+    result.result_rows = []
+    client.query.return_value = result
+    return Cache(backend=ClickHouseBackend(url="clickhouse://x", client=client)), client
+
+
+def _inserted_rows(client: MagicMock) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for call in client.insert.call_args_list:
+        for entry in call.args[1]:
+            rows.append(json.loads(entry[1]))
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Snapshot writes — ClickHouse backend (durable history → persists N)
+# ---------------------------------------------------------------------------
+
+
+class TestCacheWritesClickHouse:
+    def test_write_splits(self) -> None:
+        cache, client = _ch_cache()
+        n = cache.write_splits("AAPL", [{"split_date": "2020-08-31", "ratio": 4.0}])
         assert n == 1
-        rows = tmp_cache._conn.execute("SELECT symbol, ratio FROM splits").fetchall()
-        assert rows == [("AAPL", 4.0)]
+        rows = _inserted_rows(client)
+        assert rows[0]["symbol"] == "AAPL"
+        assert rows[0]["ratio"] == 4.0
 
-    def test_write_earnings(self, tmp_cache: Cache) -> None:
-        n = tmp_cache.write_earnings_calendar(
+    def test_write_earnings(self) -> None:
+        cache, _ = _ch_cache()
+        n = cache.write_earnings_calendar(
             "AAPL",
             [{"earnings_date": "2026-01-30", "eps_estimate": 2.1, "reported_eps": 2.18, "surprise_pct": 0.03}],
         )
         assert n == 1
-        cnt = tmp_cache._conn.execute("SELECT count(*) FROM earnings_calendar").fetchone()[0]
-        assert cnt == 1
 
-    def test_write_financials(self, tmp_cache: Cache) -> None:
-        n = tmp_cache.write_financials(
+    def test_write_financials(self) -> None:
+        cache, client = _ch_cache()
+        n = cache.write_financials(
             "AAPL", "annual", [{"period_end": "2025-09-30", "line_item": "Total Revenue", "value": 1.0}]
         )
         assert n == 1
-        period = tmp_cache._conn.execute("SELECT period FROM financials").fetchone()[0]
-        assert period == "annual"
+        assert _inserted_rows(client)[0]["period"] == "annual"
 
-    def test_write_recommendations(self, tmp_cache: Cache) -> None:
-        n = tmp_cache.write_recommendations(
+    def test_write_recommendations(self) -> None:
+        cache, _ = _ch_cache()
+        n = cache.write_recommendations(
             "AAPL",
             [{"kind": "summary", "rec_date": "0m"}, {"kind": "upgrade_downgrade", "firm": "MS", "to_grade": "Buy"}],
         )
         assert n == 2
 
-    def test_empty_rows_returns_zero(self, tmp_cache: Cache) -> None:
-        assert tmp_cache.write_splits("AAPL", []) == 0
-        assert tmp_cache.write_earnings_calendar("AAPL", []) == 0
-        assert tmp_cache.write_financials("AAPL", "annual", []) == 0
-        assert tmp_cache.write_recommendations("AAPL", []) == 0
+    def test_raw_json_roundtrip(self) -> None:
+        cache, client = _ch_cache()
+        cache.write_splits("AAPL", [{"split_date": "2020-08-31", "ratio": 4.0, "extra": "x"}])
+        rows = _inserted_rows(client)
+        assert json.loads(rows[0]["raw_json"])["extra"] == "x"
 
-    def test_cache_event_logged_on_insert(self, tmp_cache: Cache) -> None:
-        tmp_cache.write_splits("AAPL", [{"split_date": "2020-08-31", "ratio": 4.0}])
-        kinds = [r[0] for r in tmp_cache._conn.execute("SELECT kind FROM cache_events").fetchall()]
-        assert "INSERT" in kinds
+    def test_write_error_returns_zero(self) -> None:
+        cache, client = _ch_cache()
+        client.insert.side_effect = RuntimeError("boom")
+        assert cache.write_splits("AAPL", [{"split_date": "x", "ratio": 1.0}]) == 0
 
-    def test_raw_json_roundtrip(self, tmp_cache: Cache) -> None:
-        import json
 
-        tmp_cache.write_splits("AAPL", [{"split_date": "2020-08-31", "ratio": 4.0, "extra": "x"}])
-        raw = tmp_cache._conn.execute("SELECT raw_json FROM splits").fetchone()[0]
-        assert json.loads(raw)["extra"] == "x"
+# ---------------------------------------------------------------------------
+# Snapshot writes — memory backend (no durable history → persists 0)
+# ---------------------------------------------------------------------------
+
+
+class TestCacheWritesMemory:
+    def test_memory_persists_zero(self) -> None:
+        cache = Cache(backend=MemoryBackend())
+        assert cache.write_splits("AAPL", [{"split_date": "x", "ratio": 1.0}]) == 0
+        assert cache.write_earnings_calendar("AAPL", [{"earnings_date": "x"}]) == 0
+        assert cache.write_financials("AAPL", "annual", [{"line_item": "x"}]) == 0
+        assert cache.write_recommendations("AAPL", [{"kind": "summary"}]) == 0
+
+    def test_empty_rows_returns_zero(self) -> None:
+        cache = Cache(backend=MemoryBackend())
+        assert cache.write_splits("AAPL", []) == 0
+        assert cache.write_earnings_calendar("AAPL", []) == 0
+        assert cache.write_financials("AAPL", "annual", []) == 0
+        assert cache.write_recommendations("AAPL", []) == 0
+
+    def test_query_history_degrades(self) -> None:
+        cache = Cache(backend=MemoryBackend())
+        assert cache.query_history("splits")["status"] == "requires_clickhouse_persistence"
+
+    def test_query_history_clickhouse(self) -> None:
+        cache, client = _ch_cache()
+        result = MagicMock()
+        result.result_rows = [['{"symbol": "AAPL"}']]
+        client.query.return_value = result
+        out = cache.query_history("splits", limit=5)
+        assert out["status"] == "ok"
+        assert out["rows"] == [{"symbol": "AAPL"}]
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
 
 
 class TestCacheLifecycle:
-    def test_close_idempotent(self, tmp_cache: Cache) -> None:
-        tmp_cache.close()
-        tmp_cache.close()  # second close must not raise
-        assert tmp_cache._conn is None
+    def test_close_idempotent(self) -> None:
+        cache = Cache(backend=MemoryBackend())
+        cache.close()
+        cache.close()
 
-    def test_write_after_close_returns_zero(self, tmp_cache: Cache) -> None:
-        tmp_cache.close()
-        assert tmp_cache.write_splits("AAPL", [{"split_date": "x", "ratio": 1.0}]) == 0
+    def test_context_manager(self) -> None:
+        with Cache(backend=MemoryBackend()) as cache:
+            assert cache.write_splits("AAPL", [{"split_date": "x", "ratio": 1.0}]) == 0
 
-    def test_log_event_after_close_noop(self, tmp_cache: Cache) -> None:
-        tmp_cache.close()
-        tmp_cache._log_event("INSERT", "splits", 1)  # must not raise
+    def test_default_backend_is_memory(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("YFINANCE_CACHE_BACKEND", raising=False)
+        assert Cache().backend.name == "memory"
 
-    def test_executemany_db_error_logs_and_returns_zero(
-        self, tmp_cache: Cache, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        real = tmp_cache._conn
-        wrapped = MagicMock(wraps=real)
-        wrapped.executemany.side_effect = duckdb.Error("boom")
-        tmp_cache._conn = wrapped
-        assert tmp_cache.write_splits("AAPL", [{"split_date": "x", "ratio": 1.0}]) == 0
+    def test_append_rows_empty_returns_zero(self) -> None:
+        cache = Cache(backend=MemoryBackend())
+        assert cache._append_rows("splits", []) == 0
 
-    def test_init_schema_ddl_error_is_swallowed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        orig_connect = duckdb.connect
 
-        def bad_execute_conn(*a: Any, **k: Any) -> Any:
-            conn = orig_connect(*a, **k)
-            wrapped = MagicMock(wraps=conn)
-            wrapped.execute.side_effect = duckdb.Error("ddl boom")
-            return wrapped
-
-        monkeypatch.setattr(cache_module.duckdb, "connect", bad_execute_conn)
-        # Should not raise despite every DDL failing.
-        Cache(db_path=tmp_path / "c.duckdb")
-
-    def test_quarantine_on_open_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        db = tmp_path / "c.duckdb"
-        db.write_text("corrupt")
-        calls = {"n": 0}
-        orig_connect = duckdb.connect
-
-        def flaky_connect(path: str, *a: Any, **k: Any) -> Any:
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise duckdb.Error("cannot open corrupt db")
-            return orig_connect(path, *a, **k)
-
-        monkeypatch.setattr(cache_module.duckdb, "connect", flaky_connect)
-        cache = Cache(db_path=db)
-        assert cache._conn is not None
-        assert calls["n"] >= 2
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 
 
 class TestCacheConfig:
@@ -167,16 +199,10 @@ class TestCacheConfig:
         monkeypatch.setenv("YFINANCE_CACHE_BYPASS", "1")
         assert cache_bypass() is True
 
-    def test_default_db_path_override(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        monkeypatch.setenv("YFINANCE_CACHE_PATH", str(tmp_path / "x.duckdb"))
-        assert default_db_path() == tmp_path / "x.duckdb"
 
-    def test_default_db_path_xdg(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        monkeypatch.delenv("YFINANCE_CACHE_PATH", raising=False)
-        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-        p = default_db_path()
-        assert p.name == "cache.duckdb"
-        assert "yfinance-mcp" in str(p)
+# ---------------------------------------------------------------------------
+# Singleton
+# ---------------------------------------------------------------------------
 
 
 class TestCacheSingleton:
@@ -190,13 +216,14 @@ class TestCacheSingleton:
         cache_module.reset_cache_singleton()
         assert get_cache() is None
 
-    def test_get_cache_returns_singleton(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_get_cache_returns_singleton(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("YFINANCE_CACHE_ENABLED", "1")
-        monkeypatch.setenv("YFINANCE_CACHE_PATH", str(tmp_path / "c.duckdb"))
+        monkeypatch.delenv("YFINANCE_CACHE_BACKEND", raising=False)
         cache_module.reset_cache_singleton()
         c1 = get_cache()
         c2 = get_cache()
         assert c1 is c2 is not None
+        assert c1.backend.name == "memory"
         cache_module.reset_cache_singleton()
 
     def test_get_cache_init_failure_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -204,9 +231,9 @@ class TestCacheSingleton:
         cache_module.reset_cache_singleton()
 
         def boom(*a: Any, **k: Any) -> Any:
-            raise duckdb.Error("init fail")
+            raise RuntimeError("init fail")
 
-        monkeypatch.setattr(cache_module, "Cache", boom)
+        monkeypatch.setattr(cache_module, "get_cache_backend", boom)
         assert get_cache() is None
         cache_module.reset_cache_singleton()
 

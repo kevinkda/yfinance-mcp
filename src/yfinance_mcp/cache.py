@@ -1,54 +1,60 @@
-"""DuckDB-backed local cache for yfinance-mcp.
+"""Pluggable derived-history cache for yfinance-mcp (v0.7 T0).
+
+.. versionchanged:: 0.2.0
+    ⚠️ **BREAKING** — the embedded DuckDB cache is removed.  The cache now
+    delegates to a pluggable
+    :class:`~yfinance_mcp.cache_backend.CacheBackend`:
+
+    * **memory** (default) — in-process, zero external dependency,
+      concurrency-safe, non-blocking (no global ``RLock``, no file locks).
+      The memory backend keeps **no durable history**, so snapshot writes
+      report ``0`` rows persisted (graceful degradation).
+    * **clickhouse** (opt-in) — ``pip install yfinance-mcp[clickhouse]`` +
+      ``YFINANCE_CLICKHOUSE_URL`` + ``YFINANCE_CACHE_BACKEND=clickhouse`` to
+      durably persist the historical Yahoo Finance snapshots.
+
+    Selection via ``YFINANCE_CACHE_BACKEND`` (``memory`` | ``clickhouse``,
+    default ``memory``).
 
 Stores **historical snapshots** of the read-only Yahoo Finance frames this
-server fetches, so an LLM agent can run "what changed since last week"
-queries without re-hitting Yahoo (which is both slow and ToS-sensitive):
+server fetches as append-only derived-analysis time series:
 
-  * ``splits``           — one row per (symbol, split_date, observed_at)
-  * ``earnings_calendar``— upcoming/declared earnings dates per symbol
-  * ``financials``       — income-statement line items (annual / quarterly)
-  * ``recommendations``  — analyst rating rows + upgrades/downgrades
-  * ``cache_events``     — diagnostic event log (INSERT / SKIP / ERROR)
+  * ``splits``            — one row per (symbol, split_date, observed_at)
+  * ``earnings_calendar`` — upcoming/declared earnings dates per symbol
+  * ``financials``        — income-statement line items (annual / quarterly)
+  * ``recommendations``   — analyst rating rows + upgrades/downgrades
 
-Storage
--------
-Single-file DuckDB database under
-``${XDG_STATE_HOME}/yfinance-mcp/cache.duckdb`` (or ``%LOCALAPPDATA%`` on
-Windows). The DB file is chmod'd to ``0o600`` on POSIX.
-
-Failure mode
-------------
-**Cache is best-effort.** Any DuckDB / IO error is caught, logged at
-WARNING, and the caller falls through to the live yfinance response. A
-corrupt DB is renamed aside (``cache.duckdb.corrupt-<ts>``) and a fresh one
-created. This module is NOT a correctness dependency — every tool works
-with the cache disabled (``YFINANCE_CACHE_ENABLED=0``).
+Failure mode: **best-effort** — every backend swallows storage errors and the
+caller falls through to the live yfinance response.  This module is NOT a
+correctness dependency: every tool works with the cache disabled
+(``YFINANCE_CACHE_ENABLED=0``).
 """
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import os
 import threading
-import time
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, Final
 
-import duckdb
-
-from . import _platform
+from .cache_backend import (
+    CacheBackend,
+    get_cache_backend,
+)
 
 log = logging.getLogger(__name__)
 
-CACHE_DB_FILENAME: Final[str] = "cache.duckdb"
 CACHE_DIR_NAME: Final[str] = "yfinance-mcp"
 
 ENV_CACHE_ENABLED: Final[str] = "YFINANCE_CACHE_ENABLED"
 ENV_CACHE_BYPASS: Final[str] = "YFINANCE_CACHE_BYPASS"
-ENV_CACHE_PATH: Final[str] = "YFINANCE_CACHE_PATH"
+
+_SPLITS_SERIES: Final[str] = "splits"
+_EARNINGS_SERIES: Final[str] = "earnings_calendar"
+_FINANCIALS_SERIES: Final[str] = "financials"
+_RECOMMENDATIONS_SERIES: Final[str] = "recommendations"
 
 
 def _truthy(raw: str | None, *, default: bool) -> bool:
@@ -62,7 +68,7 @@ def cache_enabled() -> bool:
 
     .. versionchanged:: 0.1.1
         cache now opt-in, default disabled.  Set ``YFINANCE_CACHE_ENABLED=true``
-        (also accepts ``1`` / ``yes`` / ``on``) to enable the DuckDB cache.
+        (also accepts ``1`` / ``yes`` / ``on``) to enable it.
     """
     return _truthy(os.environ.get(ENV_CACHE_ENABLED), default=False)
 
@@ -71,241 +77,142 @@ def cache_bypass() -> bool:
     return _truthy(os.environ.get(ENV_CACHE_BYPASS), default=False)
 
 
-def default_db_path() -> Path:
-    override = os.environ.get(ENV_CACHE_PATH, "").strip()
-    if override:
-        return Path(override).expanduser()
-    return _platform.state_root() / CACHE_DIR_NAME / CACHE_DB_FILENAME
-
-
 # ---------------------------------------------------------------------------
-# Schema (DDL) — keep idempotent; CREATE TABLE IF NOT EXISTS.
-# ---------------------------------------------------------------------------
-
-_DDL: tuple[str, ...] = (
-    """
-    CREATE TABLE IF NOT EXISTS splits (
-        observed_at  TIMESTAMP NOT NULL,
-        symbol       VARCHAR   NOT NULL,
-        split_date   VARCHAR   NOT NULL,
-        ratio        DOUBLE,
-        raw_json     VARCHAR
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS earnings_calendar (
-        observed_at    TIMESTAMP NOT NULL,
-        symbol         VARCHAR   NOT NULL,
-        earnings_date  VARCHAR,
-        eps_estimate   DOUBLE,
-        reported_eps   DOUBLE,
-        surprise_pct   DOUBLE,
-        raw_json       VARCHAR
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS financials (
-        observed_at  TIMESTAMP NOT NULL,
-        symbol       VARCHAR   NOT NULL,
-        period       VARCHAR   NOT NULL,  -- annual / quarterly
-        period_end   VARCHAR,
-        line_item    VARCHAR,
-        value        DOUBLE,
-        raw_json     VARCHAR
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS recommendations (
-        observed_at  TIMESTAMP NOT NULL,
-        symbol       VARCHAR   NOT NULL,
-        kind         VARCHAR,             -- summary / upgrade_downgrade
-        firm         VARCHAR,
-        to_grade     VARCHAR,
-        from_grade   VARCHAR,
-        action       VARCHAR,
-        rec_date     VARCHAR,
-        raw_json     VARCHAR
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS cache_events (
-        ts          TIMESTAMP NOT NULL,
-        kind        VARCHAR   NOT NULL,  -- INSERT / SKIP / ERROR
-        table_name  VARCHAR,
-        row_count   BIGINT,
-        detail      VARCHAR
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_splits_symbol ON splits(symbol)",
-    "CREATE INDEX IF NOT EXISTS idx_earnings_symbol ON earnings_calendar(symbol)",
-    "CREATE INDEX IF NOT EXISTS idx_financials_symbol ON financials(symbol, period)",
-    "CREATE INDEX IF NOT EXISTS idx_recommendations_symbol ON recommendations(symbol, kind)",
-)
-
-
-# ---------------------------------------------------------------------------
-# Cache class
+# Cache facade
 # ---------------------------------------------------------------------------
 
 
 class Cache:
-    """Thread-safe DuckDB cache.
+    """Backend-agnostic derived-history writer.  One instance per process.
 
-    Open ONE instance per process and reuse it (see :func:`get_cache`). The
-    class owns the DuckDB connection and a re-entrant lock that serialises
-    writes from concurrent tool calls.
+    Delegates all storage to a :class:`CacheBackend` (memory by default,
+    ClickHouse when opted in).  The legacy snapshot-write public API is kept
+    verbatim so tools require no changes.
+
+    Each ``write_*`` method appends one row per record to the corresponding
+    derived-analysis time series and returns the number of rows the backend
+    durably persisted (``0`` on the memory backend, which keeps no history).
     """
 
-    def __init__(self, db_path: Path | None = None) -> None:
-        self._db_path: Path = db_path or default_db_path()
-        self._lock = threading.RLock()
-        self._conn: duckdb.DuckDBPyConnection | None = None
-        self._open()
-
-    # -- lifecycle --------------------------------------------------------
-
-    def _open(self) -> None:
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        with contextlib.suppress(OSError):
-            os.chmod(self._db_path.parent, 0o700)
-        try:
-            self._conn = duckdb.connect(str(self._db_path))
-        except duckdb.Error as exc:
-            log.warning("DuckDB open failed at %s: %s; quarantining and retrying", self._db_path, exc)
-            self._quarantine_and_retry()
-        self._init_schema()
-        with contextlib.suppress(OSError):
-            _platform.secure_chmod(self._db_path, 0o600)
-
-    def _quarantine_and_retry(self) -> None:
-        ts = int(time.time())
-        bad = self._db_path.with_name(f"{self._db_path.name}.corrupt-{ts}")
-        with contextlib.suppress(OSError):
-            self._db_path.rename(bad)
-            log.warning("Quarantined corrupt cache to %s", bad)
-        self._conn = duckdb.connect(str(self._db_path))
-
-    def _init_schema(self) -> None:
-        assert self._conn is not None
-        for stmt in _DDL:
-            try:
-                self._conn.execute(stmt)
-            except duckdb.Error as exc:
-                log.warning("DuckDB DDL failed: %s; stmt=%s", exc, stmt[:60])
+    def __init__(self, backend: CacheBackend | None = None) -> None:
+        self.backend: CacheBackend = backend if backend is not None else get_cache_backend()
+        self._lock = threading.Lock()
 
     def close(self) -> None:
-        with self._lock:
-            if self._conn is not None:
-                with contextlib.suppress(duckdb.Error):
-                    self._conn.close()
-                self._conn = None
+        # Pluggable backends own their own lifecycle; nothing to close for
+        # the memory backend, and the ClickHouse client is process-scoped.
+        return None
 
-    # -- write helpers ----------------------------------------------------
+    def __enter__(self) -> Cache:
+        return self
 
-    def _log_event(self, kind: str, table: str, count: int, detail: str = "") -> None:
-        if self._conn is None:
-            return
-        with contextlib.suppress(duckdb.Error):
-            self._conn.execute(
-                "INSERT INTO cache_events (ts, kind, table_name, row_count, detail) VALUES (?, ?, ?, ?, ?)",
-                [datetime.now(UTC), kind, table, count, detail[:500]],
-            )
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        del exc_type, exc, tb
+        self.close()
 
-    def _executemany(self, table: str, sql: str, rows: list[list[Any]]) -> int:
-        if self._conn is None or not rows:
+    # -- internal append helper ------------------------------------------
+
+    def _append_rows(self, series: str, rows: list[dict[str, Any]]) -> int:
+        """Append rows to *series*; return the count durably persisted.
+
+        The memory backend persists no history (returns a degradation
+        signal) → ``0`` rows.  The ClickHouse backend persists each row →
+        full count.  Storage errors are swallowed best-effort → ``0``.
+        """
+        if not rows:
             return 0
+        persisted = 0
         with self._lock:
-            try:
-                self._conn.executemany(sql, rows)
-                self._log_event("INSERT", table, len(rows))
-            except duckdb.Error as exc:
-                self._log_event("ERROR", table, 0, str(exc))
-                log.warning("cache write to %s failed: %s", table, exc)
-                return 0
-        return len(rows)
+            for row in rows:
+                try:
+                    result = self.backend.append_timeseries(series, row)
+                except Exception as exc:  # pragma: no cover - defensive
+                    log.warning("append_timeseries failed for %s: %s", series, exc)
+                    break
+                if result.get("status") == "ok":
+                    persisted += 1
+                else:
+                    # Memory backend (or error) — no durable history. Stop:
+                    # all rows in this batch share the same backend outcome.
+                    break
+        return persisted
+
+    # -- write helpers (public API — tools depend on these) ---------------
 
     def write_splits(self, symbol: str, rows: list[dict[str, Any]]) -> int:
-        ts = datetime.now(UTC)
+        ts = datetime.now(UTC).isoformat()
         prepared = [
-            [
-                ts,
-                symbol,
-                str(r.get("split_date") or ""),
-                _to_float(r.get("ratio")),
-                json.dumps(r, default=str),
-            ]
+            {
+                "observed_at": ts,
+                "symbol": symbol,
+                "split_date": str(r.get("split_date") or ""),
+                "ratio": _to_float(r.get("ratio")),
+                "raw_json": json.dumps(r, default=str),
+            }
             for r in rows
         ]
-        return self._executemany(
-            "splits",
-            "INSERT INTO splits (observed_at, symbol, split_date, ratio, raw_json) VALUES (?, ?, ?, ?, ?)",
-            prepared,
-        )
+        return self._append_rows(_SPLITS_SERIES, prepared)
 
     def write_earnings_calendar(self, symbol: str, rows: list[dict[str, Any]]) -> int:
-        ts = datetime.now(UTC)
+        ts = datetime.now(UTC).isoformat()
         prepared = [
-            [
-                ts,
-                symbol,
-                str(r.get("earnings_date") or ""),
-                _to_float(r.get("eps_estimate")),
-                _to_float(r.get("reported_eps")),
-                _to_float(r.get("surprise_pct")),
-                json.dumps(r, default=str),
-            ]
+            {
+                "observed_at": ts,
+                "symbol": symbol,
+                "earnings_date": str(r.get("earnings_date") or ""),
+                "eps_estimate": _to_float(r.get("eps_estimate")),
+                "reported_eps": _to_float(r.get("reported_eps")),
+                "surprise_pct": _to_float(r.get("surprise_pct")),
+                "raw_json": json.dumps(r, default=str),
+            }
             for r in rows
         ]
-        return self._executemany(
-            "earnings_calendar",
-            "INSERT INTO earnings_calendar (observed_at, symbol, earnings_date, eps_estimate, "
-            "reported_eps, surprise_pct, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            prepared,
-        )
+        return self._append_rows(_EARNINGS_SERIES, prepared)
 
     def write_financials(self, symbol: str, period: str, rows: list[dict[str, Any]]) -> int:
-        ts = datetime.now(UTC)
+        ts = datetime.now(UTC).isoformat()
         prepared = [
-            [
-                ts,
-                symbol,
-                period,
-                str(r.get("period_end") or ""),
-                str(r.get("line_item") or ""),
-                _to_float(r.get("value")),
-                json.dumps(r, default=str),
-            ]
+            {
+                "observed_at": ts,
+                "symbol": symbol,
+                "period": period,
+                "period_end": str(r.get("period_end") or ""),
+                "line_item": str(r.get("line_item") or ""),
+                "value": _to_float(r.get("value")),
+                "raw_json": json.dumps(r, default=str),
+            }
             for r in rows
         ]
-        return self._executemany(
-            "financials",
-            "INSERT INTO financials (observed_at, symbol, period, period_end, line_item, value, raw_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            prepared,
-        )
+        return self._append_rows(_FINANCIALS_SERIES, prepared)
 
     def write_recommendations(self, symbol: str, rows: list[dict[str, Any]]) -> int:
-        ts = datetime.now(UTC)
+        ts = datetime.now(UTC).isoformat()
         prepared = [
-            [
-                ts,
-                symbol,
-                str(r.get("kind") or ""),
-                str(r.get("firm") or ""),
-                str(r.get("to_grade") or ""),
-                str(r.get("from_grade") or ""),
-                str(r.get("action") or ""),
-                str(r.get("rec_date") or ""),
-                json.dumps(r, default=str),
-            ]
+            {
+                "observed_at": ts,
+                "symbol": symbol,
+                "kind": str(r.get("kind") or ""),
+                "firm": str(r.get("firm") or ""),
+                "to_grade": str(r.get("to_grade") or ""),
+                "from_grade": str(r.get("from_grade") or ""),
+                "action": str(r.get("action") or ""),
+                "rec_date": str(r.get("rec_date") or ""),
+                "raw_json": json.dumps(r, default=str),
+            }
             for r in rows
         ]
-        return self._executemany(
-            "recommendations",
-            "INSERT INTO recommendations (observed_at, symbol, kind, firm, to_grade, from_grade, "
-            "action, rec_date, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            prepared,
-        )
+        return self._append_rows(_RECOMMENDATIONS_SERIES, prepared)
+
+    # -- query (derived-analysis history readback) -----------------------
+
+    def query_history(self, series: str, *, limit: int = 1000) -> dict[str, Any]:
+        """Read back a derived-analysis time series.
+
+        Returns the backend payload — ``{"status": "ok", "rows": [...]}`` when
+        ClickHouse-backed, or a ``requires_clickhouse_persistence`` signal on
+        the memory backend.
+        """
+        return self.backend.query_timeseries(series, {"limit": limit})
 
 
 # ---------------------------------------------------------------------------
@@ -343,14 +250,14 @@ def get_cache() -> Cache | None:
         if _cache_singleton is None:
             try:
                 _cache_singleton = Cache()
-            except duckdb.Error as exc:
+            except Exception as exc:  # pragma: no cover - defensive backend init
                 log.warning("Cache init failed; running without cache: %s", exc)
                 return None
         return _cache_singleton
 
 
 def reset_cache_singleton() -> None:
-    """Test hook: drop the cached singleton (does NOT delete the DB file)."""
+    """Test hook: drop the cached singleton."""
     global _cache_singleton
     with _cache_singleton_lock:
         if _cache_singleton is not None:
@@ -359,10 +266,12 @@ def reset_cache_singleton() -> None:
 
 
 __all__ = [
+    "CACHE_DIR_NAME",
+    "ENV_CACHE_BYPASS",
+    "ENV_CACHE_ENABLED",
     "Cache",
     "cache_bypass",
     "cache_enabled",
-    "default_db_path",
     "get_cache",
     "reset_cache_singleton",
 ]

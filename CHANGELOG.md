@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-06-15
+
+### Changed
+
+- ⚠️ **BREAKING: the embedded DuckDB cache is removed and replaced by a
+  pluggable cache backend (v0.7 T0).** Storage is selected via
+  `YFINANCE_CACHE_BACKEND`:
+  - **memory** (default) — in-process, zero external dependency,
+    concurrency-safe, non-blocking. Removes the single-connection DuckDB +
+    global `RLock`, the on-disk `cache.duckdb` file, file locks, the
+    corrupt-DB quarantine machinery, the `cache_events` audit table, and the
+    `YFINANCE_CACHE_PATH` override. Keeps **no durable history**, so snapshot
+    writes report `snapshot_written:0` (graceful degradation).
+  - **clickhouse** (opt-in) — `pip install yfinance-mcp[clickhouse]` with
+    `YFINANCE_CLICKHOUSE_URL` and `YFINANCE_CACHE_BACKEND=clickhouse` to
+    durably persist the splits / earnings / financials / recommendations
+    history.
+- **Removed the `duckdb` runtime dependency.** ClickHouse is an opt-in
+  `[clickhouse]` extra only; the default install ships with **zero new
+  dependencies** (the `numpy<2.3` cap for the yfinance/pandas toolchain is
+  retained) and works out of the box.
+- The snapshot-write public API (`write_splits` / `write_earnings_calendar` /
+  `write_financials` / `write_recommendations`) is unchanged — all tools are
+  unaffected.
+- 100% line+branch coverage preserved (memory degradation, ClickHouse via a
+  mocked client, factory fallback, backend error paths).
+
 ## [0.1.1]
 
 ### Changed

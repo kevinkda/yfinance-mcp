@@ -6,11 +6,22 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
-import duckdb
 import pytest
 
+from yfinance_mcp.cache import Cache
+from yfinance_mcp.cache_backend import ClickHouseBackend, MemoryBackend
 from yfinance_mcp.client import YFinanceClient, YFinanceError
 from yfinance_mcp.tools import _common, earnings, financials, recommendations, splits
+
+
+def _ch_cache() -> tuple[Cache, MagicMock]:
+    client = MagicMock()
+    client.command.return_value = None
+    client.insert.return_value = None
+    result = MagicMock()
+    result.result_rows = []
+    client.query.return_value = result
+    return Cache(backend=ClickHouseBackend(url="clickhouse://x", client=client)), client
 
 
 class TestClientExceptionNormalisation:
@@ -106,30 +117,21 @@ class TestToolExceptionEnvelopes:
 
 
 class TestCacheExceptionResilience:
-    def test_executemany_error_does_not_raise(self, tmp_cache: Any) -> None:
-        real = tmp_cache._conn
-        wrapped = MagicMock(wraps=real)
-        wrapped.executemany.side_effect = duckdb.Error("disk I/O error")
-        tmp_cache._conn = wrapped
+    def test_backend_insert_error_does_not_raise(self) -> None:
+        cache, client = _ch_cache()
+        client.insert.side_effect = RuntimeError("disk I/O error")
         # Must swallow and return 0, never raise.
-        assert tmp_cache.write_financials("AAPL", "annual", [{"line_item": "x", "value": 1.0}]) == 0
+        assert cache.write_financials("AAPL", "annual", [{"line_item": "x", "value": 1.0}]) == 0
 
-    def test_log_event_error_swallowed(self, tmp_cache: Any) -> None:
-        real = tmp_cache._conn
-        wrapped = MagicMock(wraps=real)
-        wrapped.execute.side_effect = duckdb.Error("log fail")
-        tmp_cache._conn = wrapped
-        # Must not raise.
-        tmp_cache._log_event("INSERT", "splits", 1)
-        tmp_cache._conn = real
+    def test_memory_backend_degrades_to_zero(self) -> None:
+        cache = Cache(backend=MemoryBackend())
+        # Memory keeps no durable history → writes persist 0 rows, no raise.
+        assert cache.write_splits("AAPL", [{"split_date": "x", "ratio": 1.0}]) == 0
 
-    def test_close_swallows_duckdb_error(self, tmp_cache: Any) -> None:
-        real = tmp_cache._conn
-        wrapped = MagicMock(wraps=real)
-        wrapped.close.side_effect = duckdb.Error("already closed")
-        tmp_cache._conn = wrapped
-        tmp_cache.close()  # must not raise
-        assert tmp_cache._conn is None
+    def test_close_never_raises(self) -> None:
+        cache = Cache(backend=MemoryBackend())
+        cache.close()
+        cache.close()  # idempotent, must not raise
 
 
 class TestJsonifyExceptionPaths:

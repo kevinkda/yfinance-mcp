@@ -6,6 +6,7 @@ guards. Every applicable test asserts substantively.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -15,6 +16,14 @@ from pydantic import ValidationError
 from yfinance_mcp.client import _READ_ONLY_METHODS, YFinanceClient, YFinanceError
 from yfinance_mcp.models import GetEarningsCalendarInput, GetSplitsInput
 from yfinance_mcp.tools import _common, meta, splits
+
+
+def _inserted_rows(tmp_cache: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for call in tmp_cache.backend._client.insert.call_args_list:
+        for entry in call.args[1]:
+            rows.append(json.loads(entry[1]))
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -42,17 +51,11 @@ class TestA01AccessControl:
 # A02:2021 — Cryptographic Failures
 # ---------------------------------------------------------------------------
 class TestA02Cryptographic:
-    def test_na_no_secrets_to_protect_but_cache_file_is_chmod_600(self, tmp_cache: Any) -> None:
-        import stat
-
-        from yfinance_mcp import _platform
-
-        if _platform.IS_WINDOWS:
-            pytest.skip("posix perms only")
-        # No crypto/secrets in this server; the only at-rest artefact is the
-        # cache DB, which we still lock down to owner-only 0o600.
-        mode = stat.S_IMODE(tmp_cache._db_path.lstat().st_mode)
-        assert mode == 0o600
+    def test_na_no_secrets_and_no_on_disk_cache_file(self, tmp_cache: Any) -> None:
+        # v0.3.0: no crypto/secrets in this server, and the default memory
+        # backend keeps no on-disk artefact at all (the DuckDB file is gone).
+        assert tmp_cache.backend.name in {"memory", "clickhouse"}
+        assert not hasattr(tmp_cache, "_db_path")
 
 
 # ---------------------------------------------------------------------------
@@ -140,30 +143,22 @@ class TestA07Auth:
 # ---------------------------------------------------------------------------
 class TestA08Integrity:
     def test_cache_data_is_json_not_executable(self, tmp_cache: Any) -> None:
-        import json
-
         tmp_cache.write_recommendations("AAPL", [{"kind": "summary", "rec_date": "0m"}])
-        raw = tmp_cache._conn.execute("SELECT raw_json FROM recommendations").fetchone()[0]
-        # Round-trips as inert JSON; never eval'd.
-        assert isinstance(json.loads(raw), dict)
+        rows = _inserted_rows(tmp_cache)
+        # The stored raw_json round-trips as inert JSON; never eval'd.
+        assert isinstance(json.loads(rows[0]["raw_json"]), dict)
 
 
 # ---------------------------------------------------------------------------
 # A09:2021 — Security Logging & Monitoring Failures
 # ---------------------------------------------------------------------------
 class TestA09Logging:
-    def test_cache_error_event_recorded(self, tmp_cache: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        import duckdb
-
-        real = tmp_cache._conn
-        wrapped = MagicMock(wraps=real)
-        wrapped.executemany.side_effect = duckdb.Error("disk full")
-        tmp_cache._conn = wrapped
-        tmp_cache.write_splits("AAPL", [{"split_date": "x", "ratio": 1.0}])
-        # Restore conn to inspect the event log.
-        tmp_cache._conn = real
-        kinds = {r[0] for r in real.execute("SELECT kind FROM cache_events").fetchall()}
-        assert "ERROR" in kinds
+    def test_cache_write_failure_degrades_to_zero(self, tmp_cache: Any) -> None:
+        # v0.3.0: a backend insert error degrades to 0 persisted rows (the
+        # auditable signal), never raising into the tool.
+        tmp_cache.backend._client.insert.side_effect = RuntimeError("disk full")
+        persisted = tmp_cache.write_splits("AAPL", [{"split_date": "x", "ratio": 1.0}])
+        assert persisted == 0
 
 
 # ---------------------------------------------------------------------------

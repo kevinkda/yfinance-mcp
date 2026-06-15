@@ -81,13 +81,26 @@ MCP `command` + `args` shape.
 ## Cache
 
 Fetched frames (splits / earnings / financials / recommendations) are
-persisted as historical snapshots to a local DuckDB at
-`~/.local/state/yfinance-mcp/cache.duckdb`, so your LLM agent can run
-"what changed since last time" queries **without re-scraping Yahoo** (which
-is both slow and ToS-sensitive). The cache is best-effort: any DuckDB error
-is logged and the tool falls through to a live fetch. The cache is **opt-in
-(default DISABLED)** — enable it with `YFINANCE_CACHE_ENABLED=true` (also
-accepts `1` / `yes` / `on`).
+persisted as historical **derived-analysis snapshots** so your LLM agent can
+run "what changed since last time" queries **without re-scraping Yahoo**
+(which is both slow and ToS-sensitive). The cache is best-effort: any storage
+error is logged and the tool falls through to a live fetch. The cache is
+**opt-in (default DISABLED)** — enable it with `YFINANCE_CACHE_ENABLED=true`
+(also accepts `1` / `yes` / `on`).
+
+### Cache backend (v0.2.0)
+
+⚠️ **BREAKING (v0.2.0):** the embedded DuckDB cache is removed in favour of a
+pluggable backend selected via `YFINANCE_CACHE_BACKEND`:
+
+| Backend | Default | Dependency | Notes |
+| --- | --- | --- | --- |
+| `memory` | ✅ | none (stdlib) | In-process, concurrency-safe, non-blocking, no files. Keeps **no durable history** — snapshot writes report `snapshot_written:0` (graceful degradation). |
+| `clickhouse` | — | `pip install yfinance-mcp[clickhouse]` + `YFINANCE_CLICKHOUSE_URL` | Durably persists the splits/earnings/financials/recommendations history. |
+
+Without ClickHouse, history persistence degrades to a
+`requires_clickhouse_persistence` signal and the read-only tools are
+unaffected.
 
 ## Security & Terms of Service
 

@@ -186,10 +186,18 @@ class TestEarnings:
         assert out["error"]["reason"] == "rate_limited"
 
     async def test_with_cache_maps_columns(self, installed_client: YFinanceClient, tmp_cache: Any) -> None:
+        import json
+
         out = await earnings.get_earnings_calendar_impl({"symbol": "AAPL"})
         assert out["_cache_status"] == "snapshot_written:3"
-        eps = tmp_cache._conn.execute("SELECT eps_estimate FROM earnings_calendar ORDER BY eps_estimate").fetchall()
-        assert eps[-1][0] == 2.1
+        client = tmp_cache.backend._client
+        eps = sorted(
+            json.loads(entry[1])["eps_estimate"]
+            for call in client.insert.call_args_list
+            for entry in call.args[1]
+            if json.loads(entry[1]).get("eps_estimate") is not None
+        )
+        assert eps[-1] == 2.1
 
     async def test_find_missing_returns_none(self, installed_client: YFinanceClient, tmp_cache: Any) -> None:
         # rows whose columns do not match any prefix -> None mapped values
